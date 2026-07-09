@@ -7,7 +7,7 @@ import redis.asyncio as redis
 from config import REDIS_URL
 from sol_price import sol_price_loop
 from ws_listener import ws_listener
-from alert import run_dispatcher
+from alert import run_dispatcher, send_startup_message
 import stats
 
 logging.basicConfig(
@@ -33,6 +33,7 @@ async def main():
         ws_task = asyncio.create_task(ws_listener(session, r))
         checkpoint_task = asyncio.create_task(stats.checkpoint_loop(session, r))
         dispatcher_task = asyncio.create_task(run_dispatcher())
+        await send_startup_message()
 
         log.info("Bot is running")
         try:

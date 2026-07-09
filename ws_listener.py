@@ -17,6 +17,7 @@ from helius import get_transaction
 from sol_price import get_cached_sol_price
 from screener import analyze_token
 from velocity import record_buy
+import runtime_status
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +25,11 @@ _active_mints: set[str] = set()
 
 # rolling counters for the once-a-minute heartbeat line
 _hb = {"ws_events": 0, "buys_seen": 0, "txs_fetched": 0, "mcap_checks": 0}
+
+
+def _bump(key: str):
+    _hb[key] += 1
+    runtime_status.bump(key)
 
 
 async def _heartbeat_loop(r: redis.Redis, sig_queue: asyncio.Queue | None):
@@ -123,7 +129,7 @@ async def _handle_parsed_tx(
     if sol_price is None:
         return
 
-    _hb["mcap_checks"] += 1
+    _bump("mcap_checks")
     mcap = (bc_lamports / 1e9) * sol_price
     if mcap < MCAP_THRESHOLD:
         return
@@ -167,13 +173,13 @@ async def _run_enhanced(ws, http_session: aiohttp.ClientSession, r: redis.Redis)
         if msg.get("method") != "transactionNotification":
             continue
 
-        _hb["ws_events"] += 1
+        _bump("ws_events")
         tx_data = msg.get("params", {}).get("result", {}).get("transaction", {})
         mint, bc_address, bc_lamports, buyer = _parse_pump_transaction(tx_data)
         if mint is None or bc_address is None:
             continue
 
-        _hb["buys_seen"] += 1
+        _bump("buys_seen")
         await _handle_parsed_tx(http_session, r, mint, bc_address, bc_lamports, buyer)
 
 
@@ -212,7 +218,7 @@ async def _run_logs(ws, sig_queue: asyncio.Queue):
         if msg.get("method") != "logsNotification":
             continue
 
-        _hb["ws_events"] += 1
+        _bump("ws_events")
         value = msg.get("params", {}).get("result", {}).get("value", {})
         if value.get("err") is not None:
             continue
@@ -221,7 +227,7 @@ async def _run_logs(ws, sig_queue: asyncio.Queue):
         if not any("Program log: Instruction: Buy" in line for line in logs):
             continue
 
-        _hb["buys_seen"] += 1
+        _bump("buys_seen")
 
         signature = value.get("signature")
         if not signature:
@@ -243,7 +249,7 @@ async def _fetch_worker(
         signature = await sig_queue.get()
         try:
             tx_data = await get_transaction(http_session, signature)
-            _hb["txs_fetched"] += 1
+            _bump("txs_fetched")
             if tx_data:
                 mint, bc_address, bc_lamports, buyer = _parse_pump_transaction(tx_data)
                 if mint is not None and bc_address is not None:

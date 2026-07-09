@@ -1,4 +1,5 @@
 import logging
+import time
 
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
@@ -6,6 +7,7 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+import runtime_status
 import stats
 
 log = logging.getLogger(__name__)
@@ -22,6 +24,42 @@ async def cmd_stats(message: Message):
         return
     text = await stats.summary()
     await message.answer(text, parse_mode=ParseMode.HTML)
+
+
+@dp.message(Command("status"))
+async def cmd_status(message: Message):
+    if message.chat.id != TELEGRAM_CHAT_ID:
+        return
+
+    t = runtime_status.totals
+    last_event = runtime_status.last_ws_event_at
+    if last_event is None:
+        feed = "⏳ ещё не было событий"
+    else:
+        ago = int(time.time() - last_event)
+        feed = f"🟢 живой ({ago} сек назад)" if ago < 120 else f"🔴 тишина {ago // 60} мин!"
+
+    text = (
+        f"🩺 <b>Статус бота</b>\n"
+        f"⏱ Аптайм: {runtime_status.uptime_str()}\n"
+        f"📡 Поток рынка: {feed}\n"
+        f"📥 Событий получено: {t['ws_events']:,}\n"
+        f"🛒 Покупок замечено: {t['buys_seen']:,}\n"
+        f"🔍 Транзакций проверено: {t['txs_fetched']:,}\n"
+        f"📈 Расчётов капы: {t['mcap_checks']:,}\n"
+        f"🔔 Алертов отправлено: {t['alerts_sent']:,}"
+    )
+    await message.answer(text, parse_mode=ParseMode.HTML)
+
+
+async def send_startup_message():
+    try:
+        await bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text="✅ Бот запущен и следит за рынком.\n/status — проверить пульс, /stats — статистика алертов.",
+        )
+    except Exception as e:
+        log.warning("Failed to send startup message: %s", e)
 
 
 async def run_dispatcher():
@@ -71,6 +109,7 @@ async def send_alert(
                     parse_mode=ParseMode.HTML,
                 )
                 log.info("Alert with photo sent for %s", mint)
+                runtime_status.bump("alerts_sent")
                 return
             except Exception as e:
                 # broken/slow image host must not eat the alert itself
@@ -83,5 +122,6 @@ async def send_alert(
             disable_web_page_preview=True,
         )
         log.info("Alert sent for %s", mint)
+        runtime_status.bump("alerts_sent")
     except Exception as e:
         log.error("Failed to send alert for %s: %s", mint, e)
