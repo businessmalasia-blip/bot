@@ -42,3 +42,11 @@ SOCIALS_REQUIRED = os.getenv("SOCIALS_REQUIRED", "0") == "1"
 
 # Stats journal
 DB_PATH = os.getenv("DB_PATH", "screener_stats.db")
+
+# WebSocket mode:
+#   1 = transactionSubscribe (Enhanced WS, Helius Developer plan and above)
+#   0 = logsSubscribe + getTransaction fetch (works on the free tier)
+USE_ENHANCED_WS = os.getenv("USE_ENHANCED_WS", "0") == "1"
+# Free-tier budget for fetching buy transactions, requests per second.
+# 1M credits/month ~= 0.35 rps average; leave headroom for the analysis calls.
+TX_FETCH_RPS = float(os.getenv("TX_FETCH_RPS", "0.25"))

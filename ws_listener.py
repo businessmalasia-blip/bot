@@ -6,7 +6,14 @@ import aiohttp
 import redis.asyncio as redis
 import websockets
 
-from config import HELIUS_WSS, HELIUS_API_KEY, PUMP_PROGRAM, MCAP_THRESHOLD
+from config import (
+    HELIUS_WSS,
+    PUMP_PROGRAM,
+    MCAP_THRESHOLD,
+    USE_ENHANCED_WS,
+    TX_FETCH_RPS,
+)
+from helius import get_transaction
 from sol_price import get_cached_sol_price
 from screener import analyze_token
 from velocity import record_buy
@@ -70,7 +77,44 @@ def _parse_pump_transaction(data: dict) -> tuple[str | None, str | None, float, 
     return mint, bc_address, bc_balance_lamports, buyer
 
 
-async def _subscribe(ws):
+async def _handle_parsed_tx(
+    http_session: aiohttp.ClientSession,
+    r: redis.Redis,
+    mint: str,
+    bc_address: str,
+    bc_lamports: float,
+    buyer: str | None,
+):
+    """Common tail of both WS modes: velocity, mcap threshold, analysis kickoff."""
+    # velocity data accumulates for every token, so the stats
+    # are already warm by the time analysis kicks in
+    if buyer is not None:
+        try:
+            await record_buy(r, mint, buyer)
+        except Exception as e:
+            log.debug("record_buy failed for %s: %s", mint, e)
+
+    if mint in _active_mints:
+        return
+
+    sol_price = await get_cached_sol_price(r)
+    if sol_price is None:
+        return
+
+    mcap = (bc_lamports / 1e9) * sol_price
+    if mcap < MCAP_THRESHOLD:
+        return
+
+    log.info("Token %s hit $%.0f mcap, starting analysis", mint, mcap)
+    _active_mints.add(mint)
+    asyncio.create_task(_run_analysis(http_session, r, mint, bc_address))
+
+
+# ---------------------------------------------------------------------------
+# Enhanced mode: transactionSubscribe (Helius Developer plan and above)
+# ---------------------------------------------------------------------------
+
+async def _subscribe_enhanced(ws):
     subscribe_msg = {
         "jsonrpc": "2.0",
         "id": 1,
@@ -86,66 +130,129 @@ async def _subscribe(ws):
         ],
     }
     await ws.send(json.dumps(subscribe_msg))
-    log.info("Subscribed to Pump.fun transactions")
+    log.info("Subscribed to Pump.fun transactions (enhanced mode)")
+
+
+async def _run_enhanced(ws, http_session: aiohttp.ClientSession, r: redis.Redis):
+    await _subscribe_enhanced(ws)
+    async for raw_msg in ws:
+        try:
+            msg = json.loads(raw_msg)
+        except json.JSONDecodeError:
+            continue
+
+        if msg.get("method") != "transactionNotification":
+            continue
+
+        tx_data = msg.get("params", {}).get("result", {}).get("transaction", {})
+        mint, bc_address, bc_lamports, buyer = _parse_pump_transaction(tx_data)
+        if mint is None or bc_address is None:
+            continue
+
+        await _handle_parsed_tx(http_session, r, mint, bc_address, bc_lamports, buyer)
+
+
+# ---------------------------------------------------------------------------
+# Free-tier mode: logsSubscribe + sampled getTransaction fetches.
+# logsSubscribe is available on every Helius plan but carries no balances,
+# so buy signatures go into a bounded queue and a worker fetches them at
+# TX_FETCH_RPS to stay inside the monthly credit budget. Buys arrive far
+# faster than the budget allows — the queue keeps only the newest ones,
+# which is fine: a token nearing the mcap threshold produces buys every
+# few seconds, so sampling still catches it, just with a small delay.
+# ---------------------------------------------------------------------------
+
+async def _subscribe_logs(ws):
+    subscribe_msg = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "logsSubscribe",
+        "params": [
+            {"mentions": [PUMP_PROGRAM]},
+            {"commitment": "confirmed"},
+        ],
+    }
+    await ws.send(json.dumps(subscribe_msg))
+    log.info("Subscribed to Pump.fun logs (free-tier mode)")
+
+
+async def _run_logs(ws, sig_queue: asyncio.Queue):
+    await _subscribe_logs(ws)
+    async for raw_msg in ws:
+        try:
+            msg = json.loads(raw_msg)
+        except json.JSONDecodeError:
+            continue
+
+        if msg.get("method") != "logsNotification":
+            continue
+
+        value = msg.get("params", {}).get("result", {}).get("value", {})
+        if value.get("err") is not None:
+            continue
+
+        logs = value.get("logs", [])
+        if not any("Program log: Instruction: Buy" in line for line in logs):
+            continue
+
+        signature = value.get("signature")
+        if not signature:
+            continue
+
+        if sig_queue.full():
+            try:
+                sig_queue.get_nowait()  # drop the oldest, keep the stream fresh
+            except asyncio.QueueEmpty:
+                pass
+        sig_queue.put_nowait(signature)
+
+
+async def _fetch_worker(
+    http_session: aiohttp.ClientSession, r: redis.Redis, sig_queue: asyncio.Queue
+):
+    delay = 1.0 / TX_FETCH_RPS
+    while True:
+        signature = await sig_queue.get()
+        try:
+            tx_data = await get_transaction(http_session, signature)
+            if tx_data:
+                mint, bc_address, bc_lamports, buyer = _parse_pump_transaction(tx_data)
+                if mint is not None and bc_address is not None:
+                    await _handle_parsed_tx(http_session, r, mint, bc_address, bc_lamports, buyer)
+        except Exception as e:
+            log.warning("Failed to fetch tx %s: %s", signature, e)
+        await asyncio.sleep(delay)
 
 
 async def ws_listener(http_session: aiohttp.ClientSession, r: redis.Redis):
-    while True:
-        try:
-            async with websockets.connect(
-                HELIUS_WSS,
-                ping_interval=30,
-                ping_timeout=10,
-                max_size=10 * 1024 * 1024,
-            ) as ws:
-                await _subscribe(ws)
+    sig_queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+    fetch_task = None
+    if not USE_ENHANCED_WS:
+        fetch_task = asyncio.create_task(_fetch_worker(http_session, r, sig_queue))
 
-                async for raw_msg in ws:
-                    try:
-                        msg = json.loads(raw_msg)
-                    except json.JSONDecodeError:
-                        continue
+    try:
+        while True:
+            try:
+                async with websockets.connect(
+                    HELIUS_WSS,
+                    ping_interval=30,
+                    ping_timeout=10,
+                    max_size=10 * 1024 * 1024,
+                ) as ws:
+                    if USE_ENHANCED_WS:
+                        await _run_enhanced(ws, http_session, r)
+                    else:
+                        await _run_logs(ws, sig_queue)
 
-                    if "method" not in msg or msg["method"] != "transactionNotification":
-                        continue
-
-                    params = msg.get("params", {})
-                    result = params.get("result", {})
-                    tx_data = result.get("transaction", {})
-
-                    mint, bc_address, bc_lamports, buyer = _parse_pump_transaction(tx_data)
-                    if mint is None or bc_address is None:
-                        continue
-
-                    # velocity data accumulates for every token, so the stats
-                    # are already warm by the time analysis kicks in
-                    if buyer is not None:
-                        try:
-                            await record_buy(r, mint, buyer)
-                        except Exception as e:
-                            log.debug("record_buy failed for %s: %s", mint, e)
-
-                    if mint in _active_mints:
-                        continue
-
-                    sol_price = await get_cached_sol_price(r)
-                    if sol_price is None:
-                        continue
-
-                    mcap = (bc_lamports / 1e9) * sol_price
-                    if mcap < MCAP_THRESHOLD:
-                        continue
-
-                    log.info("Token %s hit $%.0f mcap, starting analysis", mint, mcap)
-                    _active_mints.add(mint)
-                    asyncio.create_task(_run_analysis(http_session, r, mint, bc_address))
-
-        except (websockets.ConnectionClosed, ConnectionError, OSError) as e:
-            log.warning("WebSocket disconnected: %s. Reconnecting in 5s...", e)
-            await asyncio.sleep(5)
-        except Exception as e:
-            log.error("Unexpected WS error: %s. Reconnecting in 10s...", e)
-            await asyncio.sleep(10)
+            except (websockets.ConnectionClosed, ConnectionError, OSError) as e:
+                log.warning("WebSocket disconnected: %s. Reconnecting in 5s...", e)
+                await asyncio.sleep(5)
+            except Exception as e:
+                log.error("Unexpected WS error: %s. Reconnecting in 10s...", e)
+                await asyncio.sleep(10)
+    finally:
+        if fetch_task is not None:
+            fetch_task.cancel()
 
 
 async def _run_analysis(
