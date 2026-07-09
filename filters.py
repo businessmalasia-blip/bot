@@ -14,10 +14,12 @@ from config import (
     BUNDLE_MAX_CREATION_TXS,
 )
 from helius import get_token_accounts, get_signatures, get_transaction, get_asset
+from jupiter import get_token_price
 
 log = logging.getLogger(__name__)
 
-JUPITER_PRICE_URL = "https://quote-api.jup.ag/v6/price"
+# a dev's past token counts as survived if it still has this much USD liquidity
+SURVIVED_MIN_LIQUIDITY = 1000.0
 
 
 async def check_concentration(
@@ -178,27 +180,13 @@ async def check_dev(
 
     survived = 0
     for token_mint in pump_tokens[:20]:
-        try:
-            async with session.get(
-                JUPITER_PRICE_URL,
-                params={"ids": token_mint, "vsToken": "USDC"},
-            ) as resp:
-                price_data = await resp.json()
-
-            token_data = price_data.get("data", {}).get(token_mint)
-            if token_data is None:
-                continue
-
-            price = float(token_data.get("price", 0))
-            volume = 0.0
-            extra_info = token_data.get("extraInfo", {})
-            if extra_info:
-                volume = float(extra_info.get("lastSwappedPrice", {}).get("lastJupiterSellAt", 0) or 0)
-
-            if price > 0:
-                survived += 1
-        except Exception as e:
-            log.warning("Error checking token price %s: %s", token_mint, e)
+        entry = await get_token_price(session, token_mint)
+        if entry is None:
+            continue
+        price = float(entry.get("usdPrice", 0) or 0)
+        liquidity = float(entry.get("liquidity", 0) or 0)
+        if price > 0 and liquidity >= SURVIVED_MIN_LIQUIDITY:
+            survived += 1
 
     msr = (survived / total_tokens) * 100 if total_tokens > 0 else 0
 

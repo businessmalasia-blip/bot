@@ -5,21 +5,19 @@ import aiohttp
 import redis.asyncio as redis
 
 from config import SOL_PRICE_INTERVAL
+from jupiter import get_token_price, SOL_MINT
 
 log = logging.getLogger(__name__)
 
-JUPITER_PRICE_URL = "https://quote-api.jup.ag/v6/price"
 REDIS_KEY = "sol_price_usd"
 
 
 async def fetch_sol_price(session: aiohttp.ClientSession) -> float | None:
-    try:
-        async with session.get(JUPITER_PRICE_URL, params={"ids": "SOL", "vsToken": "USDC"}) as resp:
-            data = await resp.json()
-        return float(data["data"]["SOL"]["price"])
-    except Exception as e:
-        log.warning("Failed to fetch SOL price: %s", e)
+    entry = await get_token_price(session, SOL_MINT)
+    if entry is None:
+        log.warning("Failed to fetch SOL price from Jupiter")
         return None
+    return float(entry["usdPrice"])
 
 
 async def sol_price_loop(session: aiohttp.ClientSession, r: redis.Redis):

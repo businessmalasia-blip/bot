@@ -8,11 +8,10 @@ import redis.asyncio as redis
 
 from config import DB_PATH
 from helius import get_account_info
+from jupiter import get_token_price
 from sol_price import get_cached_sol_price
 
 log = logging.getLogger(__name__)
-
-JUPITER_PRICE_URL = "https://quote-api.jup.ag/v6/price"
 
 # (column suffix, seconds after alert)
 CHECKPOINTS = [("1h", 3600), ("6h", 21600), ("24h", 86400)]
@@ -105,16 +104,9 @@ async def _measure_token(
         log.warning("getAccountInfo failed for %s: %s", bc_address, e)
         return None, "pending"
 
-    try:
-        async with session.get(
-            JUPITER_PRICE_URL, params={"ids": mint, "vsToken": "USDC"}
-        ) as resp:
-            data = await resp.json()
-        token_data = data.get("data", {}).get(mint)
-        if token_data and float(token_data.get("price", 0)) > 0:
-            return None, "graduated"
-    except Exception as e:
-        log.debug("Jupiter price check failed for %s: %s", mint, e)
+    entry = await get_token_price(session, mint)
+    if entry and float(entry.get("usdPrice", 0) or 0) > 0:
+        return None, "graduated"
 
     return 0.0, "dead"
 
