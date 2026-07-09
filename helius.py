@@ -43,7 +43,18 @@ async def get_signatures(
 
 
 async def get_transaction(session: aiohttp.ClientSession, signature: str) -> dict:
-    return await rpc_call(session, "getTransaction", [signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}])
+    # commitment must match the WS subscription level: the default is
+    # "finalized", which returns null for ~15s-fresh confirmed txs — and the
+    # free-tier fetch queue is almost entirely txs younger than that
+    return await rpc_call(
+        session,
+        "getTransaction",
+        [signature, {
+            "encoding": "jsonParsed",
+            "maxSupportedTransactionVersion": 0,
+            "commitment": "confirmed",
+        }],
+    )
 
 
 async def get_account_info(session: aiohttp.ClientSession, address: str) -> dict:
