@@ -24,7 +24,12 @@ log = logging.getLogger(__name__)
 _active_mints: set[str] = set()
 
 # rolling counters for the once-a-minute heartbeat line
-_hb = {"ws_events": 0, "buys_seen": 0, "txs_fetched": 0, "mcap_checks": 0}
+_hb = {
+    "ws_events": 0, "buys_seen": 0, "txs_fetched": 0, "mcap_checks": 0,
+    # diagnostics: why a fetched tx didn't reach the mcap check
+    "fetch_empty": 0,   # getTransaction returned nothing (sig too fresh / pruned)
+    "parse_fail": 0,    # fetched fine but didn't parse as a pump.fun buy
+}
 
 
 def _bump(key: str):
@@ -41,8 +46,9 @@ async def _heartbeat_loop(r: redis.Redis, sig_queue: asyncio.Queue | None):
         queue_info = f", queue={sig_queue.qsize()}" if sig_queue is not None else ""
         log.info(
             "heartbeat: ws_events=%d, buys_seen=%d, txs_fetched=%d, mcap_checks=%d, "
-            "analyzing=%d, SOL=$%s%s",
+            "fetch_empty=%d, parse_fail=%d, analyzing=%d, SOL=$%s%s",
             _hb["ws_events"], _hb["buys_seen"], _hb["txs_fetched"], _hb["mcap_checks"],
+            _hb["fetch_empty"], _hb["parse_fail"],
             len(_active_mints),
             f"{sol_price:.2f}" if sol_price is not None else "?",
             queue_info,
@@ -250,10 +256,14 @@ async def _fetch_worker(
         try:
             tx_data = await get_transaction(http_session, signature)
             _bump("txs_fetched")
-            if tx_data:
+            if not tx_data:
+                _hb["fetch_empty"] += 1
+            else:
                 mint, bc_address, bc_lamports, buyer = _parse_pump_transaction(tx_data)
                 if mint is not None and bc_address is not None:
                     await _handle_parsed_tx(http_session, r, mint, bc_address, bc_lamports, buyer)
+                else:
+                    _hb["parse_fail"] += 1
         except Exception as e:
             log.warning("Failed to fetch tx %s: %s", signature, e)
         await asyncio.sleep(delay)
