@@ -33,6 +33,9 @@ _hb = {
 }
 
 
+_hb_max_mcap = 0.0  # highest mcap seen this minute — shows how far samples reach
+
+
 def _bump(key: str):
     _hb[key] += 1
     runtime_status.bump(key)
@@ -41,21 +44,23 @@ def _bump(key: str):
 async def _heartbeat_loop(r: redis.Redis, sig_queue: asyncio.Queue | None):
     """Proof-of-life: one INFO line per minute with stream throughput.
     If buys_seen stays at 0 for several minutes, the market feed is stale."""
+    global _hb_max_mcap
     while True:
         await asyncio.sleep(60)
         sol_price = await get_cached_sol_price(r)
         queue_info = f", queue={sig_queue.qsize()}" if sig_queue is not None else ""
         log.info(
             "heartbeat: ws_events=%d, buys_seen=%d, txs_fetched=%d, mcap_checks=%d, "
-            "fetch_empty=%d, parse_fail=%d, analyzing=%d, SOL=$%s%s",
+            "fetch_empty=%d, parse_fail=%d, max_mcap=$%.0f, analyzing=%d, SOL=$%s%s",
             _hb["ws_events"], _hb["buys_seen"], _hb["txs_fetched"], _hb["mcap_checks"],
-            _hb["fetch_empty"], _hb["parse_fail"],
+            _hb["fetch_empty"], _hb["parse_fail"], _hb_max_mcap,
             len(_active_mints),
             f"{sol_price:.2f}" if sol_price is not None else "?",
             queue_info,
         )
         for k in _hb:
             _hb[k] = 0
+        _hb_max_mcap = 0.0
 
 
 def _parse_pump_transaction(data: dict) -> tuple[str | None, str | None, float, str | None]:
@@ -138,6 +143,9 @@ async def _handle_parsed_tx(
 
     _bump("mcap_checks")
     mcap = estimate_mcap_usd(bc_lamports, sol_price)
+    global _hb_max_mcap
+    if mcap > _hb_max_mcap:
+        _hb_max_mcap = mcap
     if mcap < MCAP_THRESHOLD:
         return
 
