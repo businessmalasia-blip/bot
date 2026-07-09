@@ -6,6 +6,7 @@ import redis.asyncio as redis
 
 from config import MCAP_ALERT_LOW, MCAP_WAIT_TIMEOUT, SOCIALS_REQUIRED
 from helius import get_account_info
+from pump_math import estimate_mcap_usd
 from filters import (
     check_concentration,
     calculate_human_percent,
@@ -39,7 +40,7 @@ async def wait_for_mcap(
                 lamports = info["value"]["lamports"]
                 sol_price = await get_cached_sol_price(r)
                 if sol_price is not None:
-                    mcap = (lamports / 1e9) * sol_price
+                    mcap = estimate_mcap_usd(lamports, sol_price)
                     if mcap >= MCAP_ALERT_LOW:
                         return mcap
         except Exception as e:

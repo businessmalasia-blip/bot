@@ -9,6 +9,7 @@ import redis.asyncio as redis
 from config import DB_PATH
 from helius import get_account_info
 from jupiter import get_token_price
+from pump_math import estimate_mcap_usd
 from sol_price import get_cached_sol_price
 
 log = logging.getLogger(__name__)
@@ -146,7 +147,7 @@ async def _measure_token(
             sol_price = await get_cached_sol_price(r)
             if sol_price is None:
                 return None, "pending"
-            return (lamports / 1e9) * sol_price, "on_curve"
+            return estimate_mcap_usd(lamports, sol_price), "on_curve"
     except Exception as e:
         log.warning("getAccountInfo failed for %s: %s", bc_address, e)
         return None, "pending"

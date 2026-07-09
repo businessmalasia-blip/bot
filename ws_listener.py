@@ -14,6 +14,7 @@ from config import (
     TX_FETCH_RPS,
 )
 from helius import get_transaction
+from pump_math import estimate_mcap_usd
 from sol_price import get_cached_sol_price
 from screener import analyze_token
 from velocity import record_buy
@@ -136,7 +137,7 @@ async def _handle_parsed_tx(
         return
 
     _bump("mcap_checks")
-    mcap = (bc_lamports / 1e9) * sol_price
+    mcap = estimate_mcap_usd(bc_lamports, sol_price)
     if mcap < MCAP_THRESHOLD:
         return
 
