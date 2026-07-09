@@ -22,6 +22,28 @@ log = logging.getLogger(__name__)
 
 _active_mints: set[str] = set()
 
+# rolling counters for the once-a-minute heartbeat line
+_hb = {"ws_events": 0, "buys_seen": 0, "txs_fetched": 0, "mcap_checks": 0}
+
+
+async def _heartbeat_loop(r: redis.Redis, sig_queue: asyncio.Queue | None):
+    """Proof-of-life: one INFO line per minute with stream throughput.
+    If buys_seen stays at 0 for several minutes, the market feed is stale."""
+    while True:
+        await asyncio.sleep(60)
+        sol_price = await get_cached_sol_price(r)
+        queue_info = f", queue={sig_queue.qsize()}" if sig_queue is not None else ""
+        log.info(
+            "heartbeat: ws_events=%d, buys_seen=%d, txs_fetched=%d, mcap_checks=%d, "
+            "analyzing=%d, SOL=$%s%s",
+            _hb["ws_events"], _hb["buys_seen"], _hb["txs_fetched"], _hb["mcap_checks"],
+            len(_active_mints),
+            f"{sol_price:.2f}" if sol_price is not None else "?",
+            queue_info,
+        )
+        for k in _hb:
+            _hb[k] = 0
+
 
 def _parse_pump_transaction(data: dict) -> tuple[str | None, str | None, float, str | None]:
     """Extract mint, bonding curve address, curve SOL balance and buyer (fee payer)."""
@@ -101,6 +123,7 @@ async def _handle_parsed_tx(
     if sol_price is None:
         return
 
+    _hb["mcap_checks"] += 1
     mcap = (bc_lamports / 1e9) * sol_price
     if mcap < MCAP_THRESHOLD:
         return
@@ -144,11 +167,13 @@ async def _run_enhanced(ws, http_session: aiohttp.ClientSession, r: redis.Redis)
         if msg.get("method") != "transactionNotification":
             continue
 
+        _hb["ws_events"] += 1
         tx_data = msg.get("params", {}).get("result", {}).get("transaction", {})
         mint, bc_address, bc_lamports, buyer = _parse_pump_transaction(tx_data)
         if mint is None or bc_address is None:
             continue
 
+        _hb["buys_seen"] += 1
         await _handle_parsed_tx(http_session, r, mint, bc_address, bc_lamports, buyer)
 
 
@@ -187,6 +212,7 @@ async def _run_logs(ws, sig_queue: asyncio.Queue):
         if msg.get("method") != "logsNotification":
             continue
 
+        _hb["ws_events"] += 1
         value = msg.get("params", {}).get("result", {}).get("value", {})
         if value.get("err") is not None:
             continue
@@ -194,6 +220,8 @@ async def _run_logs(ws, sig_queue: asyncio.Queue):
         logs = value.get("logs", [])
         if not any("Program log: Instruction: Buy" in line for line in logs):
             continue
+
+        _hb["buys_seen"] += 1
 
         signature = value.get("signature")
         if not signature:
@@ -215,6 +243,7 @@ async def _fetch_worker(
         signature = await sig_queue.get()
         try:
             tx_data = await get_transaction(http_session, signature)
+            _hb["txs_fetched"] += 1
             if tx_data:
                 mint, bc_address, bc_lamports, buyer = _parse_pump_transaction(tx_data)
                 if mint is not None and bc_address is not None:
@@ -229,6 +258,9 @@ async def ws_listener(http_session: aiohttp.ClientSession, r: redis.Redis):
     fetch_task = None
     if not USE_ENHANCED_WS:
         fetch_task = asyncio.create_task(_fetch_worker(http_session, r, sig_queue))
+    heartbeat_task = asyncio.create_task(
+        _heartbeat_loop(r, sig_queue if not USE_ENHANCED_WS else None)
+    )
 
     try:
         while True:
@@ -251,6 +283,7 @@ async def ws_listener(http_session: aiohttp.ClientSession, r: redis.Redis):
                 log.error("Unexpected WS error: %s. Reconnecting in 10s...", e)
                 await asyncio.sleep(10)
     finally:
+        heartbeat_task.cancel()
         if fetch_task is not None:
             fetch_task.cancel()
 
