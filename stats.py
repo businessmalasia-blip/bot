@@ -41,12 +41,39 @@ CREATE TABLE IF NOT EXISTS alerts (
 );
 """
 
+# every token that crossed MCAP_THRESHOLD — including the rejected ones.
+# rejected_by is NULL for tokens that passed every filter (= got an alert).
+# This is the labeled dataset for tuning the filters: 24h outcomes of
+# rejected tokens show which filters are throwing away future winners.
+CANDIDATES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS candidates (
+    mint TEXT PRIMARY KEY,
+    bc_address TEXT NOT NULL,
+    seen_at REAL NOT NULL,
+    mcap_seen REAL NOT NULL,
+    bundle_txs INTEGER,
+    human_pct REAL,
+    dev_status TEXT,
+    msr REAL,
+    velocity INTEGER,
+    socials TEXT,
+    rejected_by TEXT,
+    mcap_1h REAL,
+    mcap_6h REAL,
+    mcap_24h REAL,
+    status_1h TEXT,
+    status_6h TEXT,
+    status_24h TEXT
+);
+"""
+
 
 async def init_db():
     global _db
     _db = await aiosqlite.connect(DB_PATH)
     _db.row_factory = aiosqlite.Row
     await _db.execute(SCHEMA)
+    await _db.execute(CANDIDATES_SCHEMA)
     await _db.commit()
     log.info("Stats DB ready at %s", DB_PATH)
 
@@ -79,6 +106,26 @@ async def record_alert(
     )
     await _db.commit()
     log.info("Alert recorded for %s at $%.0f", mint, mcap)
+
+
+async def record_candidate(
+    mint: str,
+    bc_address: str,
+    mcap_seen: float,
+    features: dict,
+    rejected_by: str | None,
+):
+    await _db.execute(
+        """INSERT OR REPLACE INTO candidates
+           (mint, bc_address, seen_at, mcap_seen, bundle_txs, human_pct,
+            dev_status, msr, velocity, socials, rejected_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (mint, bc_address, time.time(), mcap_seen,
+         features.get("bundle_txs"), features.get("human_pct"),
+         features.get("dev_status"), features.get("msr"),
+         features.get("velocity"), features.get("socials"), rejected_by),
+    )
+    await _db.commit()
 
 
 async def _measure_token(
@@ -116,26 +163,53 @@ async def checkpoint_loop(session: aiohttp.ClientSession, r: redis.Redis):
     while True:
         try:
             now = time.time()
-            for suffix, delay in CHECKPOINTS:
-                cursor = await _db.execute(
-                    f"""SELECT mint, bc_address FROM alerts
-                        WHERE status_{suffix} IS NULL AND alerted_at <= ?""",
-                    (now - delay,),
-                )
-                rows = await cursor.fetchall()
-                for row in rows:
-                    mcap, status = await _measure_token(session, r, row["mint"], row["bc_address"])
-                    if status == "pending":
-                        continue
-                    await _db.execute(
-                        f"UPDATE alerts SET mcap_{suffix} = ?, status_{suffix} = ? WHERE mint = ?",
-                        (mcap, status, row["mint"]),
+            for table, ts_col in (("alerts", "alerted_at"), ("candidates", "seen_at")):
+                for suffix, delay in CHECKPOINTS:
+                    cursor = await _db.execute(
+                        f"""SELECT mint, bc_address FROM {table}
+                            WHERE status_{suffix} IS NULL AND {ts_col} <= ?""",
+                        (now - delay,),
                     )
-                    await _db.commit()
-                    log.info("Checkpoint %s for %s: mcap=%s status=%s", suffix, row["mint"], mcap, status)
+                    rows = await cursor.fetchall()
+                    for row in rows:
+                        mcap, status = await _measure_token(session, r, row["mint"], row["bc_address"])
+                        if status == "pending":
+                            continue
+                        await _db.execute(
+                            f"UPDATE {table} SET mcap_{suffix} = ?, status_{suffix} = ? WHERE mint = ?",
+                            (mcap, status, row["mint"]),
+                        )
+                        await _db.commit()
+                        log.info("Checkpoint %s/%s for %s: mcap=%s status=%s",
+                                 table, suffix, row["mint"], mcap, status)
         except Exception as e:
             log.error("Checkpoint loop error: %s", e)
         await asyncio.sleep(60)
+
+
+async def filter_performance() -> str:
+    """For each rejection reason: how many tokens it threw away and how many
+    of those graduated within 24h. A filter rejecting many future graduates
+    is costing win rate and should be loosened; the reverse — tightened."""
+    cursor = await _db.execute(
+        """SELECT COALESCE(rejected_by, 'passed') AS reason,
+                  COUNT(*) AS total,
+                  SUM(CASE WHEN status_24h = 'graduated' THEN 1 ELSE 0 END) AS grad,
+                  SUM(CASE WHEN status_24h IS NOT NULL THEN 1 ELSE 0 END) AS checked
+           FROM candidates GROUP BY reason ORDER BY total DESC"""
+    )
+    rows = await cursor.fetchall()
+    if not rows:
+        return ""
+
+    lines = ["\n🔬 <b>Работа фильтров</b> (градуации за 24ч среди отсеянных):"]
+    for row in rows:
+        grad = row["grad"] or 0
+        checked = row["checked"] or 0
+        pct = f"{grad / checked * 100:.0f}%" if checked else "—"
+        verb = "прошло" if row["reason"] == "passed" else "отсеяно"
+        lines.append(f"  {row['reason']}: {verb} {row['total']}, градуировало {grad}/{checked} ({pct})")
+    return "\n".join(lines)
 
 
 async def summary() -> str:
@@ -144,7 +218,8 @@ async def summary() -> str:
     rows = await cursor.fetchall()
     total = len(rows)
     if total == 0:
-        return "📊 Пока нет алертов."
+        candidates_part = await filter_performance()
+        return "📊 Пока нет алертов." + candidates_part
 
     lines = [f"📊 <b>Статистика скринера</b>", f"Всего алертов: {total}"]
 
@@ -172,4 +247,5 @@ async def summary() -> str:
             f"  💀 Умерло: {dead} ({dead / n * 100:.0f}%)"
         )
 
+    lines.append(await filter_performance())
     return "\n".join(lines)

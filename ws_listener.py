@@ -136,7 +136,7 @@ async def _handle_parsed_tx(
 
     log.info("Token %s hit $%.0f mcap, starting analysis", mint, mcap)
     _active_mints.add(mint)
-    asyncio.create_task(_run_analysis(http_session, r, mint, bc_address))
+    asyncio.create_task(_run_analysis(http_session, r, mint, bc_address, mcap))
 
 
 # ---------------------------------------------------------------------------
@@ -299,9 +299,10 @@ async def _run_analysis(
     r: redis.Redis,
     mint: str,
     bc_address: str,
+    mcap_seen: float = 0.0,
 ):
     try:
-        await analyze_token(session, r, mint, bc_address)
+        await analyze_token(session, r, mint, bc_address, mcap_seen)
     except Exception as e:
         log.error("Analysis failed for %s: %s", mint, e)
     finally:

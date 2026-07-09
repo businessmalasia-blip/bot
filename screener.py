@@ -55,39 +55,56 @@ async def analyze_token(
     r: redis.Redis,
     mint: str,
     bonding_curve_address: str,
+    mcap_seen: float = 0.0,
 ):
     log.info("Analyzing token %s", mint)
 
+    # every candidate goes into the dataset, including the rejected ones —
+    # their 24h outcomes tell us which filters throw away future winners
+    features: dict = {}
+
+    async def reject(reason: str):
+        log.info("Token %s rejected by %s", mint, reason)
+        await stats.record_candidate(mint, bonding_curve_address, mcap_seen, features, reason)
+
     bundle_passed, bundle_txs = await check_bundle(session, mint)
+    features["bundle_txs"] = bundle_txs
     if not bundle_passed:
-        log.info("Token %s failed bundle check (%d txs in creation slot)", mint, bundle_txs)
+        await reject("bundle")
         return
 
     passed, holder_addresses = await check_concentration(session, mint)
     if not passed:
-        log.info("Token %s failed concentration check", mint)
+        await reject("concentration")
         return
 
     human_passed, human_pct = await calculate_human_percent(session, holder_addresses, r)
+    features["human_pct"] = human_pct
     if not human_passed:
-        log.info("Token %s failed human check (%.1f%%)", mint, human_pct)
+        await reject("human")
         return
 
     dev_result = await check_dev(session, mint, r)
+    features["dev_status"] = dev_result["status"]
+    features["msr"] = dev_result.get("msr")
     if dev_result["status"] == "Bad":
-        log.info("Token %s has bad dev", mint)
+        await reject("dev")
         return
 
     socials = await check_socials(session, mint)
     has_socials = any(k in socials for k in SOCIAL_KEYS)
+    features["socials"] = ",".join(k for k in SOCIAL_KEYS if k in socials)
     if SOCIALS_REQUIRED and not has_socials:
-        log.info("Token %s has no socials, rejected", mint)
+        await reject("socials")
         return
 
     velocity_passed, buyers = await check_velocity(r, mint)
+    features["velocity"] = buyers
     if not velocity_passed:
-        log.info("Token %s failed velocity check (%d buyers)", mint, buyers)
+        await reject("velocity")
         return
+
+    await stats.record_candidate(mint, bonding_curve_address, mcap_seen, features, None)
 
     log.info("Token %s passed all filters, waiting for mcap >= $%d", mint, MCAP_ALERT_LOW)
 
