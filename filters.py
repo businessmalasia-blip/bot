@@ -278,8 +278,18 @@ async def check_socials(session: aiohttp.ClientSession, mint: str) -> dict:
         if url:
             socials[key] = url
 
+    image = links.get("image")
+    if not image:
+        for f in content.get("files", []) or []:
+            uri = f.get("uri") or f.get("cdn_uri")
+            mime = f.get("mime", "")
+            if uri and (mime.startswith("image") or not mime):
+                image = f.get("cdn_uri") or uri
+                break
+
     json_uri = content.get("json_uri")
-    if json_uri and len(socials) - 2 < len(SOCIAL_KEYS):
+    need_more = not image or any(k not in socials for k in SOCIAL_KEYS)
+    if json_uri and need_more:
         try:
             async with session.get(json_uri, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 meta_json = await resp.json(content_type=None)
@@ -288,8 +298,16 @@ async def check_socials(session: aiohttp.ClientSession, mint: str) -> dict:
                     url = meta_json.get(key)
                     if url and key not in socials:
                         socials[key] = url
+                if not image:
+                    image = meta_json.get("image")
         except Exception as e:
             log.debug("Failed to fetch metadata JSON for %s: %s", mint, e)
+
+    if image:
+        # Telegram can't fetch ipfs:// URIs directly — route through a gateway
+        if image.startswith("ipfs://"):
+            image = "https://ipfs.io/ipfs/" + image[len("ipfs://"):]
+        socials["_image"] = image
 
     found = [k for k in SOCIAL_KEYS if k in socials]
     log.info("Socials for %s: %s", mint, found or "none")

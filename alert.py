@@ -50,7 +50,8 @@ async def send_alert(
         f"\U0001f525 <b>QUALITY TOKEN</b>\n"
         f"\U0001fa99 <b>{name}</b> ({symbol})\n"
         f"\U0001f4cb CA: <code>{mint}</code>\n"
-        f'\U0001f517 <a href="https://photon-sol.tinyastro.io/token/{mint}">Photon</a>\n'
+        f'\U0001f517 <a href="https://photon-sol.tinyastro.io/token/{mint}">Photon</a>'
+        f' | <a href="https://gmgn.ai/sol/token/{mint}">GMGN</a>\n'
         f"\U0001f465 Humans: {human_percent:.0f}%\n"
         f"\U0001f468‍\U0001f4bb Dev: {dev_status}{msr_info}\n"
         f"⚡ Velocity: {velocity} buyers/min\n"
@@ -59,7 +60,22 @@ async def send_alert(
         f"\U0001f4b0 MC: ${market_cap:,.0f}"
     )
 
+    image_url = socials.get("_image")
     try:
+        if image_url:
+            try:
+                await bot.send_photo(
+                    chat_id=TELEGRAM_CHAT_ID,
+                    photo=image_url,
+                    caption=text,
+                    parse_mode=ParseMode.HTML,
+                )
+                log.info("Alert with photo sent for %s", mint)
+                return
+            except Exception as e:
+                # broken/slow image host must not eat the alert itself
+                log.warning("send_photo failed for %s (%s), falling back to text", mint, e)
+
         await bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
             text=text,
