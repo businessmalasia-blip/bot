@@ -3,3 +3,5 @@ aiohttp>=3.9
 aiogram>=3.4
 redis[hiredis]>=5.0
 python-dotenv>=1.0
+aiosqlite>=0.19
+

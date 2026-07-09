@@ -9,16 +9,17 @@ import websockets
 from config import HELIUS_WSS, HELIUS_API_KEY, PUMP_PROGRAM, MCAP_THRESHOLD
 from sol_price import get_cached_sol_price
 from screener import analyze_token
+from velocity import record_buy
 
 log = logging.getLogger(__name__)
 
 _active_mints: set[str] = set()
 
 
-def _parse_pump_transaction(data: dict) -> tuple[str | None, str | None, float]:
-    """Extract mint address, bonding curve address, and SOL balance from a pump.fun tx."""
+def _parse_pump_transaction(data: dict) -> tuple[str | None, str | None, float, str | None]:
+    """Extract mint, bonding curve address, curve SOL balance and buyer (fee payer)."""
     if not isinstance(data, dict):
-        return None, None, 0.0
+        return None, None, 0.0, None
 
     log_messages = data.get("meta", {}).get("logMessages", [])
     is_buy = False
@@ -28,14 +29,17 @@ def _parse_pump_transaction(data: dict) -> tuple[str | None, str | None, float]:
             break
 
     if not is_buy:
-        return None, None, 0.0
+        return None, None, 0.0, None
 
     account_keys = data.get("transaction", {}).get("message", {}).get("accountKeys", [])
     pre_balances = data.get("meta", {}).get("preBalances", [])
     post_balances = data.get("meta", {}).get("postBalances", [])
 
     if not account_keys or not pre_balances or not post_balances:
-        return None, None, 0.0
+        return None, None, 0.0, None
+
+    first_key = account_keys[0]
+    buyer = first_key["pubkey"] if isinstance(first_key, dict) else first_key
 
     post_token_balances = data.get("meta", {}).get("postTokenBalances", [])
     mint = None
@@ -46,7 +50,7 @@ def _parse_pump_transaction(data: dict) -> tuple[str | None, str | None, float]:
             break
 
     if mint is None:
-        return None, None, 0.0
+        return None, None, 0.0, None
 
     max_gain = 0
     bc_index = -1
@@ -57,13 +61,13 @@ def _parse_pump_transaction(data: dict) -> tuple[str | None, str | None, float]:
             bc_index = i
 
     if bc_index < 0:
-        return None, None, 0.0
+        return None, None, 0.0, None
 
     key = account_keys[bc_index]
     bc_address = key["pubkey"] if isinstance(key, dict) else key
     bc_balance_lamports = post_balances[bc_index]
 
-    return mint, bc_address, bc_balance_lamports
+    return mint, bc_address, bc_balance_lamports, buyer
 
 
 async def _subscribe(ws):
@@ -109,9 +113,17 @@ async def ws_listener(http_session: aiohttp.ClientSession, r: redis.Redis):
                     result = params.get("result", {})
                     tx_data = result.get("transaction", {})
 
-                    mint, bc_address, bc_lamports = _parse_pump_transaction(tx_data)
+                    mint, bc_address, bc_lamports, buyer = _parse_pump_transaction(tx_data)
                     if mint is None or bc_address is None:
                         continue
+
+                    # velocity data accumulates for every token, so the stats
+                    # are already warm by the time analysis kicks in
+                    if buyer is not None:
+                        try:
+                            await record_buy(r, mint, buyer)
+                        except Exception as e:
+                            log.debug("record_buy failed for %s: %s", mint, e)
 
                     if mint in _active_mints:
                         continue

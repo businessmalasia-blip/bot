@@ -4,43 +4,49 @@ import logging
 import aiohttp
 import redis.asyncio as redis
 
-from config import MCAP_ALERT_LOW, MCAP_ALERT_HIGH
-from helius import get_account_info, get_asset
-from filters import check_concentration, calculate_human_percent, check_dev
+from config import MCAP_ALERT_LOW, MCAP_WAIT_TIMEOUT, SOCIALS_REQUIRED
+from helius import get_account_info
+from filters import (
+    check_concentration,
+    calculate_human_percent,
+    check_dev,
+    check_bundle,
+    check_socials,
+    SOCIAL_KEYS,
+)
+from velocity import check_velocity
 from sol_price import get_cached_sol_price
 from alert import send_alert
+import stats
 
 log = logging.getLogger(__name__)
 
 
-async def wait_for_mcap_range(
+async def wait_for_mcap(
     session: aiohttp.ClientSession,
     r: redis.Redis,
     bonding_curve_address: str,
-    timeout: float = 300,
 ) -> float | None:
-    deadline = asyncio.get_event_loop().time() + timeout
+    """Dynamic window: fires at the FIRST crossing of MCAP_ALERT_LOW.
+    No upper bound — a token that shoots past the mark between polls
+    still produces an alert instead of being dropped.
+    """
+    deadline = asyncio.get_event_loop().time() + MCAP_WAIT_TIMEOUT
     while asyncio.get_event_loop().time() < deadline:
         try:
             info = await get_account_info(session, bonding_curve_address)
             if info and info.get("value"):
                 lamports = info["value"]["lamports"]
-                sol_balance = lamports / 1e9
                 sol_price = await get_cached_sol_price(r)
-                if sol_price is None:
-                    await asyncio.sleep(2)
-                    continue
-                mcap = sol_balance * sol_price
-                if MCAP_ALERT_LOW <= mcap <= MCAP_ALERT_HIGH:
-                    return mcap
-                if mcap > MCAP_ALERT_HIGH:
-                    log.info("MC $%.0f exceeded upper bound, skipping", mcap)
-                    return None
+                if sol_price is not None:
+                    mcap = (lamports / 1e9) * sol_price
+                    if mcap >= MCAP_ALERT_LOW:
+                        return mcap
         except Exception as e:
             log.warning("Error polling mcap: %s", e)
         await asyncio.sleep(2)
 
-    log.info("Timeout waiting for mcap range on %s", bonding_curve_address)
+    log.info("Timeout waiting for mcap on %s", bonding_curve_address)
     return None
 
 
@@ -51,6 +57,11 @@ async def analyze_token(
     bonding_curve_address: str,
 ):
     log.info("Analyzing token %s", mint)
+
+    bundle_passed, bundle_txs = await check_bundle(session, mint)
+    if not bundle_passed:
+        log.info("Token %s failed bundle check (%d txs in creation slot)", mint, bundle_txs)
+        return
 
     passed, holder_addresses = await check_concentration(session, mint)
     if not passed:
@@ -67,22 +78,25 @@ async def analyze_token(
         log.info("Token %s has bad dev", mint)
         return
 
-    log.info("Token %s passed all filters, waiting for mcap $%d-$%d", mint, MCAP_ALERT_LOW, MCAP_ALERT_HIGH)
+    socials = await check_socials(session, mint)
+    has_socials = any(k in socials for k in SOCIAL_KEYS)
+    if SOCIALS_REQUIRED and not has_socials:
+        log.info("Token %s has no socials, rejected", mint)
+        return
 
-    mcap = await wait_for_mcap_range(session, r, bonding_curve_address)
+    velocity_passed, buyers = await check_velocity(r, mint)
+    if not velocity_passed:
+        log.info("Token %s failed velocity check (%d buyers)", mint, buyers)
+        return
+
+    log.info("Token %s passed all filters, waiting for mcap >= $%d", mint, MCAP_ALERT_LOW)
+
+    mcap = await wait_for_mcap(session, r, bonding_curve_address)
     if mcap is None:
         return
 
-    name = mint[:8]
-    symbol = "???"
-    try:
-        asset = await get_asset(session, mint)
-        content = asset.get("content", {})
-        metadata = content.get("metadata", {})
-        name = metadata.get("name", name)
-        symbol = metadata.get("symbol", symbol)
-    except Exception as e:
-        log.warning("Failed to get asset metadata for %s: %s", mint, e)
+    name = socials.get("_name") or mint[:8]
+    symbol = socials.get("_symbol") or "???"
 
     await send_alert(
         mint=mint,
@@ -92,4 +106,21 @@ async def analyze_token(
         dev_status=dev_result["status"],
         msr=dev_result.get("msr"),
         market_cap=mcap,
+        velocity=buyers,
+        bundle_txs=bundle_txs,
+        socials=socials,
+    )
+
+    await stats.record_alert(
+        mint=mint,
+        bc_address=bonding_curve_address,
+        name=name,
+        symbol=symbol,
+        mcap=mcap,
+        human_pct=human_pct,
+        dev_status=dev_result["status"],
+        msr=dev_result.get("msr"),
+        velocity=buyers,
+        bundle_txs=bundle_txs,
+        socials=[k for k in SOCIAL_KEYS if k in socials],
     )

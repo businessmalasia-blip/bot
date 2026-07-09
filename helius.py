@@ -33,8 +33,13 @@ async def get_token_accounts(session: aiohttp.ClientSession, mint: str, limit: i
     return result.get("token_accounts", [])
 
 
-async def get_signatures(session: aiohttp.ClientSession, address: str, limit: int = 1) -> list:
-    return await rpc_call(session, "getSignaturesForAddress", [address, {"limit": limit}])
+async def get_signatures(
+    session: aiohttp.ClientSession, address: str, limit: int = 1, before: str | None = None
+) -> list:
+    opts: dict = {"limit": limit}
+    if before is not None:
+        opts["before"] = before
+    return await rpc_call(session, "getSignaturesForAddress", [address, opts])
 
 
 async def get_transaction(session: aiohttp.ClientSession, signature: str) -> dict:

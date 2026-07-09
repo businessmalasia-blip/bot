@@ -7,6 +7,8 @@ import redis.asyncio as redis
 from config import REDIS_URL
 from sol_price import sol_price_loop
 from ws_listener import ws_listener
+from alert import run_dispatcher
+import stats
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,14 +24,21 @@ async def main():
     await r.ping()
     log.info("Redis connected")
 
+    await stats.init_db()
+
     async with aiohttp.ClientSession() as session:
         price_task = asyncio.create_task(sol_price_loop(session, r))
         await asyncio.sleep(3)
 
         ws_task = asyncio.create_task(ws_listener(session, r))
+        checkpoint_task = asyncio.create_task(stats.checkpoint_loop(session, r))
+        dispatcher_task = asyncio.create_task(run_dispatcher())
 
         log.info("Bot is running")
-        await asyncio.gather(price_task, ws_task)
+        try:
+            await asyncio.gather(price_task, ws_task, checkpoint_task, dispatcher_task)
+        finally:
+            await stats.close_db()
 
 
 if __name__ == "__main__":

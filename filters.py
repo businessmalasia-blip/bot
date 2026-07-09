@@ -11,8 +11,9 @@ from config import (
     HUMAN_MIN_PERCENT,
     UNKNOWN_MAX_PERCENT,
     PUMP_PROGRAM,
+    BUNDLE_MAX_CREATION_TXS,
 )
-from helius import get_token_accounts, get_signatures, get_transaction
+from helius import get_token_accounts, get_signatures, get_transaction, get_asset
 
 log = logging.getLogger(__name__)
 
@@ -210,3 +211,86 @@ async def check_dev(
 
     log.info("Dev %s: %d tokens, %d survived, MSR=%.1f%%, status=%s", fee_payer, total_tokens, survived, msr, status)
     return {"status": status, "msr": msr, "dev": fee_payer, "tokens": total_tokens}
+
+
+async def check_bundle(session: aiohttp.ClientSession, mint: str) -> tuple[bool, int]:
+    """Sniper-bundle signature: several transactions land in the token's
+    creation slot (or the one right after). Walks the signature history back
+    to the oldest page to find the creation slot, then counts txs in it.
+
+    Returns (passed, txs_in_creation_slots).
+    """
+    all_sigs: list[dict] = []
+    before = None
+    for _ in range(3):  # up to 3000 signatures back — enough for a token at ~$10k
+        page = await get_signatures(session, mint, limit=1000, before=before)
+        if not page:
+            break
+        all_sigs.extend(page)
+        if len(page) < 1000:
+            break
+        before = page[-1]["signature"]
+
+    if not all_sigs:
+        return False, 0
+
+    slots = [s["slot"] for s in all_sigs if s.get("slot")]
+    if not slots:
+        return False, 0
+
+    creation_slot = min(slots)
+    creation_txs = sum(1 for s in slots if s <= creation_slot + 1)
+
+    passed = creation_txs <= BUNDLE_MAX_CREATION_TXS
+    log.info(
+        "Bundle check for %s: %d txs in creation slot %d(+1), passed=%s",
+        mint, creation_txs, creation_slot, passed,
+    )
+    return passed, creation_txs
+
+
+SOCIAL_KEYS = ("twitter", "telegram", "website", "discord")
+
+
+async def check_socials(session: aiohttp.ClientSession, mint: str) -> dict:
+    """Collects social links from DAS getAsset: both the indexed content.links
+    and the raw off-chain metadata JSON (pump.fun puts twitter/telegram there).
+
+    Returns {"twitter": url, ...} with only the links that were found.
+    Also returns name/symbol under "_name"/"_symbol" so the caller can reuse
+    them for the alert without a second getAsset call.
+    """
+    socials: dict = {}
+    try:
+        asset = await get_asset(session, mint)
+    except Exception as e:
+        log.warning("getAsset failed for %s: %s", mint, e)
+        return socials
+
+    content = asset.get("content", {})
+    metadata = content.get("metadata", {})
+    socials["_name"] = metadata.get("name")
+    socials["_symbol"] = metadata.get("symbol")
+
+    links = content.get("links", {}) or {}
+    for key in SOCIAL_KEYS:
+        url = links.get(key)
+        if url:
+            socials[key] = url
+
+    json_uri = content.get("json_uri")
+    if json_uri and len(socials) - 2 < len(SOCIAL_KEYS):
+        try:
+            async with session.get(json_uri, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                meta_json = await resp.json(content_type=None)
+            if isinstance(meta_json, dict):
+                for key in SOCIAL_KEYS:
+                    url = meta_json.get(key)
+                    if url and key not in socials:
+                        socials[key] = url
+        except Exception as e:
+            log.debug("Failed to fetch metadata JSON for %s: %s", mint, e)
+
+    found = [k for k in SOCIAL_KEYS if k in socials]
+    log.info("Socials for %s: %s", mint, found or "none")
+    return socials
