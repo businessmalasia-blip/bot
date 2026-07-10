@@ -25,7 +25,7 @@ SURVIVED_MIN_LIQUIDITY = 1000.0
 
 
 async def check_concentration(
-    session: aiohttp.ClientSession, mint: str
+    session: aiohttp.ClientSession, mint: str, bonding_curve: str | None = None
 ) -> tuple[bool, list[str]]:
     accounts = await get_token_accounts(session, mint)
     if not accounts:
@@ -45,13 +45,15 @@ async def check_concentration(
     for h in holders:
         h["pct"] = (h["amount"] / total_supply) * 100
 
-    bonding_curve_owner = None
-    for h in holders:
-        if h["pct"] > 50:
-            bonding_curve_owner = h["owner"]
-            break
+    # exclude the bonding curve by address — the ">50%" heuristic stops
+    # working mid-curve, where the curve's share drops below 50% and it
+    # would be counted as a whale, false-rejecting every token
+    def is_curve(h) -> bool:
+        if bonding_curve is not None and h["owner"] == bonding_curve:
+            return True
+        return h["pct"] > 50
 
-    filtered = [h for h in holders if h["owner"] != bonding_curve_owner]
+    filtered = [h for h in holders if not is_curve(h)]
     filtered.sort(key=lambda x: x["amount"], reverse=True)
 
     for h in filtered:

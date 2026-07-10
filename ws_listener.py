@@ -23,6 +23,8 @@ import runtime_status
 
 log = logging.getLogger(__name__)
 
+WSOL_MINT = "So11111111111111111111111111111111111111112"
+
 _active_mints: set[str] = set()
 
 # rolling counters for the once-a-minute heartbeat line
@@ -89,17 +91,6 @@ def _parse_pump_transaction(data: dict) -> tuple[str | None, str | None, float, 
     first_key = account_keys[0]
     buyer = first_key["pubkey"] if isinstance(first_key, dict) else first_key
 
-    post_token_balances = data.get("meta", {}).get("postTokenBalances", [])
-    mint = None
-    for ptb in post_token_balances:
-        m = ptb.get("mint")
-        if m:
-            mint = m
-            break
-
-    if mint is None:
-        return None, None, 0.0, None
-
     max_gain = 0
     bc_index = -1
     for i in range(len(pre_balances)):
@@ -114,6 +105,24 @@ def _parse_pump_transaction(data: dict) -> tuple[str | None, str | None, float, 
     key = account_keys[bc_index]
     bc_address = key["pubkey"] if isinstance(key, dict) else key
     bc_balance_lamports = post_balances[bc_index]
+
+    # the traded mint is the one whose token account is owned by the bonding
+    # curve; "first mint in postTokenBalances" grabs USDC/WSOL on router txs
+    post_token_balances = data.get("meta", {}).get("postTokenBalances", [])
+    candidates = [
+        p for p in post_token_balances
+        if p.get("mint") and p["mint"] != WSOL_MINT
+    ]
+    mint = None
+    for p in candidates:
+        if p.get("owner") == bc_address:
+            mint = p["mint"]
+            break
+    if mint is None and candidates:
+        mint = candidates[0]["mint"]
+
+    if mint is None:
+        return None, None, 0.0, None
 
     return mint, bc_address, bc_balance_lamports, buyer
 

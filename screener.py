@@ -72,7 +72,7 @@ async def analyze_token(
     # concentration 1 call, velocity 0 (Redis), socials ~2, bundle 1-5,
     # human up to ~100, dev up to ~70
 
-    passed, holder_addresses = await check_concentration(session, mint)
+    passed, holder_addresses = await check_concentration(session, mint, bonding_curve_address)
     if not passed:
         await reject("concentration")
         return
