@@ -201,33 +201,41 @@ async def check_dev(
     return {"status": status, "msr": msr, "dev": fee_payer, "tokens": total_tokens}
 
 
-async def check_bundle(session: aiohttp.ClientSession, mint: str) -> tuple[bool, int]:
+async def check_bundle(session: aiohttp.ClientSession, mint: str) -> tuple[bool, int | None]:
     """Sniper-bundle signature: several transactions land in the token's
     creation slot (or the one right after). Walks the signature history back
     to the oldest page to find the creation slot, then counts txs in it.
 
-    Returns (passed, txs_in_creation_slots).
+    Returns (passed, txs_in_creation_slots). CRITICAL: the count is only
+    meaningful if pagination actually reached the token's first signature.
+    Active tokens can have tens of thousands of txs; when the history is
+    deeper than we can walk, verdict is "unknown" — (True, None), fail-open —
+    because measuring a random old slot rejects every active token.
     """
-    all_sigs: list[dict] = []
+    all_slots: list[int] = []
     before = None
-    for _ in range(3):  # up to 3000 signatures back — enough for a token at ~$10k
+    reached_creation = False
+    for _ in range(5):  # up to 5000 signatures back
         page = await get_signatures(session, mint, limit=1000, before=before)
         if not page:
+            reached_creation = True
             break
-        all_sigs.extend(page)
+        all_slots.extend(s["slot"] for s in page if s.get("slot"))
         if len(page) < 1000:
+            reached_creation = True
             break
         before = page[-1]["signature"]
 
-    if not all_sigs:
-        return False, 0
+    if not reached_creation:
+        log.info("Bundle check for %s: history deeper than %d sigs, verdict unknown", mint, len(all_slots))
+        return True, None
 
-    slots = [s["slot"] for s in all_sigs if s.get("slot")]
-    if not slots:
-        return False, 0
+    if not all_slots:
+        log.warning("Bundle check for %s: empty signature history, verdict unknown", mint)
+        return True, None
 
-    creation_slot = min(slots)
-    creation_txs = sum(1 for s in slots if s <= creation_slot + 1)
+    creation_slot = min(all_slots)
+    creation_txs = sum(1 for s in all_slots if s <= creation_slot + 1)
 
     passed = creation_txs <= BUNDLE_MAX_CREATION_TXS
     log.info(

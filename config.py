@@ -20,11 +20,11 @@ MCAP_THRESHOLD = float(os.getenv("MCAP_THRESHOLD", "8000"))
 MCAP_ALERT_LOW = float(os.getenv("MCAP_ALERT_LOW", "10000"))
 MCAP_WAIT_TIMEOUT = float(os.getenv("MCAP_WAIT_TIMEOUT", "300"))
 
-CONCENTRATION_MAX_SINGLE = float(os.getenv("CONCENTRATION_MAX_SINGLE", "2.5"))
-CONCENTRATION_MAX_TOP10 = float(os.getenv("CONCENTRATION_MAX_TOP10", "15.0"))
+CONCENTRATION_MAX_SINGLE = float(os.getenv("CONCENTRATION_MAX_SINGLE", "3.5"))
+CONCENTRATION_MAX_TOP10 = float(os.getenv("CONCENTRATION_MAX_TOP10", "22.0"))
 
-HUMAN_MIN_PERCENT = float(os.getenv("HUMAN_MIN_PERCENT", "60"))
-UNKNOWN_MAX_PERCENT = float(os.getenv("UNKNOWN_MAX_PERCENT", "20"))
+HUMAN_MIN_PERCENT = float(os.getenv("HUMAN_MIN_PERCENT", "50"))
+UNKNOWN_MAX_PERCENT = float(os.getenv("UNKNOWN_MAX_PERCENT", "30"))
 
 HELIUS_RPS = int(os.getenv("HELIUS_RPS", "5"))
 HELIUS_DELAY = 1.0 / HELIUS_RPS
@@ -34,8 +34,9 @@ VELOCITY_MIN_BUYERS = int(os.getenv("VELOCITY_MIN_BUYERS", "5"))
 VELOCITY_WINDOW = int(os.getenv("VELOCITY_WINDOW", "60"))
 
 # Bundle detection: max transactions allowed in the creation slot (+1 slot).
-# The creation tx itself counts, so 3 means "creation + up to 2 buys".
-BUNDLE_MAX_CREATION_TXS = int(os.getenv("BUNDLE_MAX_CREATION_TXS", "3"))
+# The creation tx itself counts, and it usually contains the dev's own buy;
+# a couple of same-slot snipers are common even on legit launches.
+BUNDLE_MAX_CREATION_TXS = int(os.getenv("BUNDLE_MAX_CREATION_TXS", "5"))
 
 # Socials: informational by default; set to 1 to reject tokens without any socials
 SOCIALS_REQUIRED = os.getenv("SOCIALS_REQUIRED", "0") == "1"

@@ -68,15 +68,32 @@ async def analyze_token(
         log.info("Token %s rejected by %s", mint, reason)
         await stats.record_candidate(mint, bonding_curve_address, mcap_seen, features, reason)
 
-    bundle_passed, bundle_txs = await check_bundle(session, mint)
-    features["bundle_txs"] = bundle_txs
-    if not bundle_passed:
-        await reject("bundle")
-        return
+    # ordered cheapest-first so rejects burn as few Helius credits as possible:
+    # concentration 1 call, velocity 0 (Redis), socials ~2, bundle 1-5,
+    # human up to ~100, dev up to ~70
 
     passed, holder_addresses = await check_concentration(session, mint)
     if not passed:
         await reject("concentration")
+        return
+
+    velocity_passed, buyers = await check_velocity(r, mint)
+    features["velocity"] = buyers
+    if not velocity_passed:
+        await reject("velocity")
+        return
+
+    socials = await check_socials(session, mint)
+    has_socials = any(k in socials for k in SOCIAL_KEYS)
+    features["socials"] = ",".join(k for k in SOCIAL_KEYS if k in socials)
+    if SOCIALS_REQUIRED and not has_socials:
+        await reject("socials")
+        return
+
+    bundle_passed, bundle_txs = await check_bundle(session, mint)
+    features["bundle_txs"] = bundle_txs
+    if not bundle_passed:
+        await reject("bundle")
         return
 
     human_passed, human_pct = await calculate_human_percent(session, holder_addresses, r)
@@ -90,19 +107,6 @@ async def analyze_token(
     features["msr"] = dev_result.get("msr")
     if dev_result["status"] == "Bad":
         await reject("dev")
-        return
-
-    socials = await check_socials(session, mint)
-    has_socials = any(k in socials for k in SOCIAL_KEYS)
-    features["socials"] = ",".join(k for k in SOCIAL_KEYS if k in socials)
-    if SOCIALS_REQUIRED and not has_socials:
-        await reject("socials")
-        return
-
-    velocity_passed, buyers = await check_velocity(r, mint)
-    features["velocity"] = buyers
-    if not velocity_passed:
-        await reject("velocity")
         return
 
     await stats.record_candidate(mint, bonding_curve_address, mcap_seen, features, None)

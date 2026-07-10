@@ -80,10 +80,15 @@ async def send_alert(
     msr: float | None,
     market_cap: float,
     velocity: int,
-    bundle_txs: int,
+    bundle_txs: int | None,
     socials: dict,
 ):
     msr_info = f" (MSR: {msr:.0f}%)" if msr is not None else ""
+    bundle_info = (
+        f"clean ({bundle_txs} tx in creation slot)"
+        if bundle_txs is not None
+        else "unknown (deep history)"
+    )
     text = (
         f"\U0001f525 <b>QUALITY TOKEN</b>\n"
         f"\U0001fa99 <b>{name}</b> ({symbol})\n"
@@ -93,7 +98,7 @@ async def send_alert(
         f"\U0001f465 Humans: {human_percent:.0f}%\n"
         f"\U0001f468‍\U0001f4bb Dev: {dev_status}{msr_info}\n"
         f"⚡ Velocity: {velocity} buyers/min\n"
-        f"\U0001f4e6 Bundle: clean ({bundle_txs} tx in creation slot)\n"
+        f"\U0001f4e6 Bundle: {bundle_info}\n"
         f"\U0001f310 Socials: {_format_socials(socials)}\n"
         f"\U0001f4b0 MC: ${market_cap:,.0f}"
     )
