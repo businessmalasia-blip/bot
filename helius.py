@@ -29,7 +29,10 @@ async def rpc_call(session: aiohttp.ClientSession, method: str, params: list | d
 
 
 async def get_token_accounts(session: aiohttp.ClientSession, mint: str, limit: int = 100) -> list:
-    result = await rpc_call(session, "getTokenAccounts", [mint, {"limit": limit}])
+    # DAS method: params is a single object, not positional array
+    result = await rpc_call(
+        session, "getTokenAccounts", {"mint": mint, "limit": limit, "page": 1}
+    )
     return result.get("token_accounts", [])
 
 

@@ -12,6 +12,7 @@ from config import (
     MCAP_THRESHOLD,
     USE_ENHANCED_WS,
     TX_FETCH_RPS,
+    ANALYZED_TTL,
 )
 from helius import get_transaction
 from pump_math import estimate_mcap_usd
@@ -147,6 +148,11 @@ async def _handle_parsed_tx(
     if mcap > _hb_max_mcap:
         _hb_max_mcap = mcap
     if mcap < MCAP_THRESHOLD:
+        return
+
+    # every buy above the threshold lands here — analyze each mint once
+    # per ANALYZED_TTL, not on every buy
+    if await r.exists(f"analyzed:{mint}"):
         return
 
     log.info("Token %s hit $%.0f mcap, starting analysis", mint, mcap)
@@ -321,8 +327,11 @@ async def _run_analysis(
     mcap_seen: float = 0.0,
 ):
     try:
+        await r.set(f"analyzed:{mint}", "1", ex=ANALYZED_TTL)
         await analyze_token(session, r, mint, bc_address, mcap_seen)
     except Exception as e:
         log.error("Analysis failed for %s: %s", mint, e)
+        # transient RPC failure — allow a retry on the token's next buy
+        await r.delete(f"analyzed:{mint}")
     finally:
         _active_mints.discard(mint)

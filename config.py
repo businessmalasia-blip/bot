@@ -51,6 +51,10 @@ SOCIALS_REQUIRED = os.getenv("SOCIALS_REQUIRED", "0") == "1"
 # Stats journal
 DB_PATH = os.getenv("DB_PATH", "screener_stats.db")
 
+# Don't re-analyze the same mint more often than this (seconds). Every buy
+# above the threshold re-triggers analysis otherwise, burning credits.
+ANALYZED_TTL = int(os.getenv("ANALYZED_TTL", "21600"))
+
 # WebSocket mode:
 #   1 = transactionSubscribe (Enhanced WS, Helius Developer plan and above)
 #   0 = logsSubscribe + getTransaction fetch (works on the free tier)
