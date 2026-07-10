@@ -26,6 +26,13 @@ CONCENTRATION_MAX_TOP10 = float(os.getenv("CONCENTRATION_MAX_TOP10", "22.0"))
 HUMAN_MIN_PERCENT = float(os.getenv("HUMAN_MIN_PERCENT", "50"))
 UNKNOWN_MAX_PERCENT = float(os.getenv("UNKNOWN_MAX_PERCENT", "30"))
 
+# Cache TTLs for wallet-history lookups. A wallet that has history keeps it
+# forever, so a long HUMAN TTL is safe and lets the cache accumulate a real
+# base of known-alive wallets (and saves Helius credits on re-checks).
+# UNKNOWN wallets may become active any minute — keep that TTL short.
+HUMAN_CACHE_TTL = int(os.getenv("HUMAN_CACHE_TTL", str(7 * 86400)))
+UNKNOWN_CACHE_TTL = int(os.getenv("UNKNOWN_CACHE_TTL", "1800"))
+
 HELIUS_RPS = int(os.getenv("HELIUS_RPS", "5"))
 HELIUS_DELAY = 1.0 / HELIUS_RPS
 

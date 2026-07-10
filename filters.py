@@ -12,6 +12,8 @@ from config import (
     UNKNOWN_MAX_PERCENT,
     PUMP_PROGRAM,
     BUNDLE_MAX_CREATION_TXS,
+    HUMAN_CACHE_TTL,
+    UNKNOWN_CACHE_TTL,
 )
 from helius import get_token_accounts, get_signatures, get_transaction, get_asset
 from jupiter import get_token_price
@@ -91,10 +93,10 @@ async def calculate_human_percent(
             sigs = await get_signatures(session, address, limit=1)
             if sigs and len(sigs) > 0:
                 human_count += 1
-                await r.set(f"human:{address}", "1", ex=3600)
+                await r.set(f"human:{address}", "1", ex=HUMAN_CACHE_TTL)
             else:
                 unknown_count += 1
-                await r.set(f"human:{address}", "0", ex=300)
+                await r.set(f"human:{address}", "0", ex=UNKNOWN_CACHE_TTL)
         except Exception as e:
             log.warning("Error checking address %s: %s", address, e)
             unknown_count += 1
