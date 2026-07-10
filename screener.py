@@ -72,9 +72,9 @@ async def analyze_token(
     # concentration 1 call, velocity 0 (Redis), socials ~2, bundle 1-5,
     # human up to ~100, dev up to ~70
 
-    passed, holder_addresses = await check_concentration(session, mint, bonding_curve_address)
-    if not passed:
-        await reject("concentration")
+    conc_reason, holder_addresses = await check_concentration(session, mint, bonding_curve_address)
+    if conc_reason is not None:
+        await reject(conc_reason)
         return
 
     velocity_passed, buyers = await check_velocity(r, mint)
@@ -90,10 +90,10 @@ async def analyze_token(
         await reject("socials")
         return
 
-    bundle_passed, bundle_txs = await check_bundle(session, mint)
+    bundle_reason, bundle_txs = await check_bundle(session, mint)
     features["bundle_txs"] = bundle_txs
-    if not bundle_passed:
-        await reject("bundle")
+    if bundle_reason is not None:
+        await reject(bundle_reason)
         return
 
     human_passed, human_pct = await calculate_human_percent(session, holder_addresses, r)

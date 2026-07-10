@@ -45,6 +45,13 @@ VELOCITY_WINDOW = int(os.getenv("VELOCITY_WINDOW", "60"))
 # a couple of same-slot snipers are common even on legit launches.
 BUNDLE_MAX_CREATION_TXS = int(os.getenv("BUNDLE_MAX_CREATION_TXS", "5"))
 
+# Sniper-cluster detection: N+ non-curve wallets holding near-identical
+# amounts is a wallet-farm signature (each stays under the single-holder
+# cap, together they own the token). Reject when a cluster of at least
+# CLUSTER_MIN_WALLETS same-sized wallets holds >= CLUSTER_MIN_TOTAL_PCT.
+CLUSTER_MIN_WALLETS = int(os.getenv("CLUSTER_MIN_WALLETS", "5"))
+CLUSTER_MIN_TOTAL_PCT = float(os.getenv("CLUSTER_MIN_TOTAL_PCT", "8.0"))
+
 # Socials: informational by default; set to 1 to reject tokens without any socials
 SOCIALS_REQUIRED = os.getenv("SOCIALS_REQUIRED", "0") == "1"
 

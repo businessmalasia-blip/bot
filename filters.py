@@ -14,6 +14,8 @@ from config import (
     BUNDLE_MAX_CREATION_TXS,
     HUMAN_CACHE_TTL,
     UNKNOWN_CACHE_TTL,
+    CLUSTER_MIN_WALLETS,
+    CLUSTER_MIN_TOTAL_PCT,
 )
 from helius import get_token_accounts, get_signatures, get_transaction, get_asset
 from jupiter import get_token_price
@@ -26,11 +28,13 @@ SURVIVED_MIN_LIQUIDITY = 1000.0
 
 async def check_concentration(
     session: aiohttp.ClientSession, mint: str, bonding_curve: str | None = None
-) -> tuple[bool, list[str]]:
+) -> tuple[str | None, list[str]]:
+    """Returns (reject_reason, holder_addresses); reason None means passed.
+    Reasons: "concentration" (single/top-10 caps), "cluster" (sniper farm)."""
     accounts = await get_token_accounts(session, mint)
     if not accounts:
         log.warning("No holders found for %s", mint)
-        return False, []
+        return "concentration", []
 
     holders: list[dict] = []
     for acc in accounts:
@@ -40,7 +44,7 @@ async def check_concentration(
 
     total_supply = sum(h["amount"] for h in holders)
     if total_supply == 0:
-        return False, []
+        return "concentration", []
 
     for h in holders:
         h["pct"] = (h["amount"] / total_supply) * 100
@@ -59,15 +63,39 @@ async def check_concentration(
     for h in filtered:
         if h["pct"] > CONCENTRATION_MAX_SINGLE:
             log.info("Holder %s has %.2f%% — too concentrated", h["owner"], h["pct"])
-            return False, []
+            return "concentration", []
 
     top10_sum = sum(h["pct"] for h in filtered[:10])
     if top10_sum > CONCENTRATION_MAX_TOP10:
         log.info("Top-10 hold %.2f%% — too concentrated", top10_sum)
-        return False, []
+        return "concentration", []
+
+    # sniper-farm signature: a run of near-identical balances. Each wallet
+    # individually passes the single-holder cap; together they own the token.
+    cluster_size = 1
+    cluster_pct = 0.0
+    best_size, best_pct = 1, 0.0
+    for i in range(1, len(filtered)):
+        prev, cur = filtered[i - 1]["amount"], filtered[i]["amount"]
+        if cur > 0 and prev > 0 and cur / prev >= 0.9:  # within 10% of the previous
+            if cluster_size == 1:
+                cluster_pct = filtered[i - 1]["pct"]
+            cluster_size += 1
+            cluster_pct += filtered[i]["pct"]
+        else:
+            cluster_size, cluster_pct = 1, 0.0
+        if cluster_pct > best_pct:
+            best_size, best_pct = cluster_size, cluster_pct
+
+    if best_size >= CLUSTER_MIN_WALLETS and best_pct >= CLUSTER_MIN_TOTAL_PCT:
+        log.info(
+            "Cluster of %d same-sized wallets holds %.1f%% — sniper farm",
+            best_size, best_pct,
+        )
+        return "cluster", []
 
     holder_addresses = [h["owner"] for h in filtered]
-    return True, holder_addresses
+    return None, holder_addresses
 
 
 async def calculate_human_percent(
@@ -205,16 +233,15 @@ async def check_dev(
     return {"status": status, "msr": msr, "dev": fee_payer, "tokens": total_tokens}
 
 
-async def check_bundle(session: aiohttp.ClientSession, mint: str) -> tuple[bool, int | None]:
+async def check_bundle(session: aiohttp.ClientSession, mint: str) -> tuple[str | None, int | None]:
     """Sniper-bundle signature: several transactions land in the token's
     creation slot (or the one right after). Walks the signature history back
     to the oldest page to find the creation slot, then counts txs in it.
 
-    Returns (passed, txs_in_creation_slots). CRITICAL: the count is only
-    meaningful if pagination actually reached the token's first signature.
-    Active tokens can have tens of thousands of txs; when the history is
-    deeper than we can walk, verdict is "unknown" — (True, None), fail-open —
-    because measuring a random old slot rejects every active token.
+    Returns (reject_reason, txs_in_creation_slots); reason None means passed.
+    A bonding-phase token with >5000 signatures is wash-trading spam — real
+    tokens reach $10k in hundreds to a couple thousand txs — so a history
+    too deep to walk is a reject ("tx_spam"), not a free pass.
     """
     all_slots: list[int] = []
     before = None
@@ -231,12 +258,12 @@ async def check_bundle(session: aiohttp.ClientSession, mint: str) -> tuple[bool,
         before = page[-1]["signature"]
 
     if not reached_creation:
-        log.info("Bundle check for %s: history deeper than %d sigs, verdict unknown", mint, len(all_slots))
-        return True, None
+        log.info("Bundle check for %s: >%d sigs on the curve — wash-trading spam", mint, len(all_slots))
+        return "tx_spam", None
 
     if not all_slots:
         log.warning("Bundle check for %s: empty signature history, verdict unknown", mint)
-        return True, None
+        return None, None
 
     creation_slot = min(all_slots)
     creation_txs = sum(1 for s in all_slots if s <= creation_slot + 1)
@@ -246,7 +273,7 @@ async def check_bundle(session: aiohttp.ClientSession, mint: str) -> tuple[bool,
         "Bundle check for %s: %d txs in creation slot %d(+1), passed=%s",
         mint, creation_txs, creation_slot, passed,
     )
-    return passed, creation_txs
+    return None if passed else "bundle", creation_txs
 
 
 SOCIAL_KEYS = ("twitter", "telegram", "website", "discord")
